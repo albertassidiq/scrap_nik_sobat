@@ -24,7 +24,6 @@ Username=isi_username_sso
 Password=isi_password_sso
 Sensus/Survei=(SE2026) SENSUS EKONOMI 2026
 Kegiatan=PENDATAAN
-nama_petugas=sisa_mitra.xlsx
 ```
 
 Biasanya yang diganti cukup `Username` dan `Password`.
