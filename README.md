@@ -7,8 +7,10 @@ Isi utama:
 - `config-automasi-pengajuan.txt`: konfigurasi akun SSO dan kegiatan.
 - `pilih_kegiatan_kepka.py`: login lalu berhenti setelah memilih kegiatan.
 - `scrape_kepka_full_nik.py`: scrape tabel dan NIK dari modal detail.
+- `scrape_kepka_rekening.py`: scrape tabel, nama bank, nomor rekening, dan pemilik rekening dari modal detail.
 - `run_pilih_kegiatan_kepka.cmd`: test login + pilih kegiatan saja.
 - `run_scrape_kepka_full_nik.cmd`: jalankan scrape penuh dengan mode resume.
+- `run_scrape_kepka_rekening.cmd`: jalankan scrape rekening penuh dengan mode resume.
 - `setup_venv.cmd`: bikin ulang venv kalau venv bawaan tidak jalan setelah dipindah komputer.
 - `venv/`: Python virtual environment yang sudah berisi dependency.
 - `requirements.txt`: daftar dependency kalau perlu bikin ulang venv.
@@ -46,6 +48,12 @@ Double click:
 run_scrape_kepka_full_nik.cmd
 ```
 
+Untuk scrape rekening:
+
+```txt
+run_scrape_kepka_rekening.cmd
+```
+
 Atau lewat CMD:
 
 ```bat
@@ -54,6 +62,8 @@ run_scrape_kepka_full_nik.cmd
 ```
 
 Runner memakai `--resume`, jadi kalau proses berhenti di tengah, jalankan ulang command yang sama. Row yang sudah sukses akan diskip dari file JSON progress.
+
+Output rekening tersimpan di `scrap_kepka_rekening.json`.
 
 ## Kalau muncul captcha / Akses Dibatasi
 

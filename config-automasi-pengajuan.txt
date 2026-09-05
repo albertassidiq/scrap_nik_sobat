@@ -1,4 +1,0 @@
-Username=user.name
-Password=pwluapa
-Sensus/Survei=(SE2026) SENSUS EKONOMI 2026
-Kegiatan=PENDATAAN

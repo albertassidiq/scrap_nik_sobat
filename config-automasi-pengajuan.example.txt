@@ -1,0 +1,5 @@
+Username=your_username
+Password=your_password
+Sensus/Survei=your_survey
+Kegiatan=your_activity
+

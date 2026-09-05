@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+# Local credentials and authenticated browser state.
+config-automasi-pengajuan.txt
+session_state.json
+
+# Scraped personal data and diagnostic captures.
+scrap_kepka_full_nik.json
+scrap_kepka_rekening.json
+scrap_kepka_full_nik_last_page.png
+scrap_kepka_rekening_last_page.png
+

@@ -2,6 +2,7 @@ import argparse
 import json
 import random
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,9 +23,9 @@ import captcha_bypass
 
 
 BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_JSON_PATH = BASE_DIR / "scrap_kepka_full_nik.json"
-SCREENSHOT_PATH = BASE_DIR / "scrap_kepka_full_nik_last_page.png"
-DEBUG_SCREENSHOT_PATH = BASE_DIR / "scrap_kepka_full_nik_debug.png"
+OUTPUT_JSON_PATH = BASE_DIR / "scrap_kepka_rekening.json"
+SCREENSHOT_PATH = BASE_DIR / "scrap_kepka_rekening_last_page.png"
+DEBUG_SCREENSHOT_PATH = BASE_DIR / "scrap_kepka_rekening_debug.png"
 
 
 def compact_text(text: str) -> str:
@@ -111,8 +112,8 @@ def load_existing_rows() -> list[dict]:
     seen = set()
     for row in rows:
         sobat_id = str(row.get("Sobat-ID", "")).strip()
-        nik = str(row.get("NIK", "")).strip()
-        if not sobat_id or not nik or sobat_id in seen:
+        nomor_rekening = str(row.get("Nomor Rekening", "")).strip()
+        if not sobat_id or not nomor_rekening or sobat_id in seen:
             continue
         cleaned.append(row)
         seen.add(sobat_id)
@@ -181,14 +182,13 @@ def visible_rows(page):
 def get_row_data(row) -> dict:
     cells = row.locator("td")
     status, last_update, email, waktu = parse_status(cells.nth(5).inner_text())
-    nik_cell = cells.nth(0)
-    masked_nik = compact_text(nik_cell.locator("[title='Lihat Detail Mitra']").first.inner_text())
 
     return {
         "No": compact_text(row.locator("th.line-numbers").inner_text()),
-        "NIK": "",
-        "NIK Tersensor": masked_nik,
-        "NIK Terverifikasi": "Ya" if nik_cell.locator("i.fa-check-circle-o").count() else "Tidak",
+        "Nama Bank": "",
+        "Nomor Rekening": "",
+        "Nomor Rekening Tersensor": "",
+        "Nama Pemilik Rekening": "",
         "Sobat-ID": compact_text(cells.nth(1).inner_text()),
         "Nama": compact_text(cells.nth(2).inner_text()),
         "Posisi Daftar": compact_text(cells.nth(3).inner_text()),
@@ -202,33 +202,27 @@ def get_row_data(row) -> dict:
     }
 
 
-def find_nik_field(modal, masked_nik: str):
-    labeled_field = modal.locator(
-        "xpath=.//label[contains(normalize-space(), 'NIK KTP')]/"
+def find_plaintext_field(modal, label_text: str):
+    field = modal.locator(
+        f"xpath=.//label[contains(normalize-space(), '{label_text}')]/"
         "following-sibling::div[contains(@class, 'form-control-plaintext')][1]"
     ).first
-    if labeled_field.count():
+    if field.count():
         try:
-            labeled_field.wait_for(state="visible", timeout=5000)
+            field.wait_for(state="visible", timeout=5000)
         except PlaywrightTimeoutError:
             pass
-        return labeled_field
-
-    masked_prefix = masked_nik.split("*", 1)[0]
-    fields = modal.locator(".form-control-plaintext")
-    count = fields.count()
-
-    for index in range(count):
-        field = fields.nth(index)
-        text = compact_text(field.inner_text(timeout=2000))
-        if re.search(r"\b\d{16}\b", text):
-            return field
-        if masked_prefix and masked_prefix in text:
-            return field
-        if re.search(r"\d{6}\*+", text):
-            return field
-
+        return field
     return None
+
+
+def field_text(field) -> str:
+    if field is None:
+        return ""
+    try:
+        return compact_text(field.inner_text(timeout=8000))
+    except Exception:
+        return ""
 
 
 def detail_dialog(page):
@@ -261,20 +255,95 @@ def wait_detail_dialog(page, timeout=7000) -> None:
     )
 
 
-def wait_access_limited_if_present(page, tracker=None, timeout=300000) -> bool:
+def access_limited_visible(page) -> bool:
+    try:
+        body_text = page.locator("body").inner_text(timeout=100).lower()
+    except Exception:
+        body_text = ""
+
+    challenge_texts = [
+        "akses dibatasi",
+        "saya bukan robot",
+        "i'm not a robot",
+        "checking if the site connection is secure",
+        "verify you are human",
+    ]
+    if any(text in body_text for text in challenge_texts):
+        return True
+
+    challenge_selectors = [
+        "iframe[src*='captcha']",
+        "iframe[src*='recaptcha']",
+        "iframe[src*='turnstile']",
+        "iframe[title*='captcha']",
+        "iframe[title*='challenge']",
+    ]
+    for selector in challenge_selectors:
+        try:
+            locator = page.locator(selector)
+            for index in range(min(locator.count(), 3)):
+                if locator.nth(index).is_visible(timeout=250):
+                    return True
+        except Exception:
+            continue
+
+    return False
+
+
+def detail_rekening_ready(page) -> bool:
+    try:
+        modal = detail_dialog(page)
+        if modal.locator("#tabs-rekening-btn, a[href='#tabs-rekening']").first.is_visible(timeout=500):
+            return True
+        modal_text = modal.inner_text(timeout=500)
+        return "Nomor Rekening" in modal_text or "Nama Bank" in modal_text
+    except Exception:
+        return False
+
+
+def wait_app_ready_after_manual_check(page, timeout=300000) -> str:
+    deadline = time.monotonic() + (timeout / 1000)
+    while time.monotonic() < deadline:
+        if not access_limited_visible(page):
+            if detail_rekening_ready(page):
+                return "modal rekening"
+
+            try:
+                modal = detail_dialog(page)
+                if modal.is_visible(timeout=500):
+                    modal_text = modal.inner_text(timeout=500)
+                    if "Mengambil Data" not in modal_text:
+                        return "modal"
+            except Exception:
+                pass
+
+            try:
+                if mitra_table(page).is_visible(timeout=500):
+                    return "table"
+            except Exception:
+                pass
+
+        page.wait_for_timeout(1000)
+
+    page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
+    raise RuntimeError(f"Captcha/Akses Dibatasi belum selesai. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
+
+
+def wait_access_limited_if_present(page, tracker=None, timeout=300000) -> str | None:
     try:
         access_box = page.locator("text=Akses Dibatasi").last
         access_box.wait_for(state="visible", timeout=800)
     except Exception:
-        return False
+        if not access_limited_visible(page):
+            return None
 
     print("[MANUAL] Captcha/Akses Dibatasi muncul. Klik 'Saya bukan robot' di browser; script menunggu...")
     if tracker:
         tracker.record_captcha()
-    access_box.wait_for(state="hidden", timeout=timeout)
+    ready_state = wait_app_ready_after_manual_check(page, timeout=timeout)
     page.wait_for_timeout(1500)
-    print("[OK] Captcha selesai, lanjut scrape.")
-    return True
+    print(f"[OK] Captcha selesai, aplikasi kembali ke {ready_state}.")
+    return ready_state
 
 
 def open_detail_from_row(page, row_index: int, tracker=None) -> None:
@@ -282,56 +351,103 @@ def open_detail_from_row(page, row_index: int, tracker=None) -> None:
 
     for attempt in range(1, 4):
         rows = visible_rows(page)
-        nik_link = rows.nth(row_index).locator("td").nth(0).locator("[title='Lihat Detail Mitra']").first
-        nik_link.evaluate("element => element.scrollIntoView({ block: 'center', inline: 'center' })")
+        detail_link = rows.nth(row_index).locator("td").nth(0).locator("[title='Lihat Detail Mitra']").first
+        detail_link.evaluate("element => element.scrollIntoView({ block: 'center', inline: 'center' })")
         page.wait_for_timeout(300)
 
         try:
-            captcha_bypass.move_mouse_to_locator(page, nik_link)
+            captcha_bypass.move_mouse_to_locator(page, detail_link)
             if attempt == 1:
-                nik_link.click(timeout=5000)
+                detail_link.click(timeout=5000)
             elif attempt == 2:
-                nik_link.click(force=True, timeout=5000)
+                detail_link.click(force=True, timeout=5000)
             else:
-                box = nik_link.bounding_box()
+                box = detail_link.bounding_box()
                 if not box:
-                    raise RuntimeError("Bounding box link NIK tidak tersedia.")
+                    raise RuntimeError("Bounding box link detail mitra tidak tersedia.")
                 page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
 
             wait_detail_dialog(page, timeout=6000)
             return
         except Exception:
+            ready_state = wait_access_limited_if_present(page, tracker)
+            if ready_state and "modal" in ready_state:
+                return
             if attempt == 3:
                 page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
                 raise
             page.wait_for_timeout(800)
 
 
-def get_nik_target(page, masked_nik: str):
+def get_rekening_targets(page):
     wait_detail_dialog(page, timeout=15000)
     modal = detail_dialog(page)
 
-    profile_tab = modal.locator("#tabs-profil-btn").first
-    if profile_tab.count():
+    tab_selectors = [
+        "#tabs-rekening-btn",
+        "a[href='#tabs-rekening']",
+        "a[data-bs-toggle='tab']:has-text('Rekening')",
+    ]
+
+    tab_ready = None
+    for selector in tab_selectors:
+        tab = modal.locator(selector).first
         try:
-            profile_tab.click(force=True, timeout=3000)
-            page.wait_for_timeout(300)
-        except Exception:
-            pass
+            tab.wait_for(state="visible", timeout=30000)
+            tab_ready = tab
+            break
+        except PlaywrightTimeoutError:
+            continue
 
-    field = find_nik_field(modal, masked_nik)
-    target = field if field is not None else modal
-    return modal, target
+    if tab_ready is None:
+        page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
+        raise RuntimeError(f"Tab Rekening tidak ditemukan setelah data modal dimuat. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
+
+    for selector in tab_selectors:
+        tab = modal.locator(selector).first
+        if tab.count():
+            try:
+                tab.click(force=True, timeout=5000)
+                page.wait_for_timeout(500)
+                break
+            except Exception:
+                continue
+
+    bank_field = find_plaintext_field(modal, "Nama Bank")
+    rekening_field = find_plaintext_field(modal, "Nomor Rekening")
+    owner_field = find_plaintext_field(modal, "Nama Pemilik Rekening")
+
+    if rekening_field is None:
+        page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
+        raise RuntimeError(f"Field Nomor Rekening tidak ditemukan. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
+    try:
+        rekening_field.wait_for(state="visible", timeout=10000)
+    except PlaywrightTimeoutError:
+        page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
+        raise RuntimeError(f"Field Nomor Rekening belum terlihat setelah tab Rekening diklik. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
+
+    return modal, bank_field, rekening_field, owner_field
 
 
-def read_nik_from_target(target) -> str | None:
-    text = compact_text(target.inner_text(timeout=8000))
-    match = re.search(r"\b\d{16}\b", text)
-    return match.group(0) if match else None
+def read_rekening_from_target(target) -> str | None:
+    text = field_text(target)
+    if not text or "*" in text:
+        return None
+
+    digits = re.sub(r"\D", "", text)
+    if 5 <= len(digits) <= 30:
+        return digits
+    return None
 
 
-def click_nik_eye(modal, target, page) -> bool:
+def click_rekening_eye(modal, target, page) -> bool:
     eye_button = target.locator("button:has(i.fa-eye)").first
+    if eye_button.count() == 0:
+        group = modal.locator(
+            "xpath=.//label[contains(normalize-space(), 'Nomor Rekening')]/"
+            "ancestor::div[contains(@class, 'form-group')][1]"
+        ).first
+        eye_button = group.locator("button:has(i.fa-eye)").first
     if eye_button.count() == 0:
         eye_button = modal.locator("button:has(i.fa-eye)").first
 
@@ -344,7 +460,7 @@ def click_nik_eye(modal, target, page) -> bool:
         return False
 
 
-def reveal_nik_from_modal(page, masked_nik: str, tracker=None) -> str:
+def reveal_rekening_from_modal(page, tracker=None) -> dict:
     try:
         wait_detail_dialog(page, timeout=15000)
     except PlaywrightTimeoutError:
@@ -356,41 +472,57 @@ def reveal_nik_from_modal(page, masked_nik: str, tracker=None) -> str:
             f"Jumlah .modal={modal_count}, role=dialog={dialog_count}"
         )
 
-    wait_access_limited_if_present(page, tracker)
-    modal, target = get_nik_target(page, masked_nik)
+    if wait_access_limited_if_present(page, tracker):
+        raise RuntimeError("Captcha selesai; ulang buka detail agar state modal rekening bersih.")
+    modal, bank_field, target, owner_field = get_rekening_targets(page)
+
+    bank_name = field_text(bank_field)
+    owner_name = field_text(owner_field)
+    masked_rekening = field_text(target)
 
     try:
-        visible_nik = read_nik_from_target(target)
-        if visible_nik:
-            return visible_nik
+        visible_rekening = read_rekening_from_target(target)
+        if visible_rekening:
+            return {
+                "Nama Bank": bank_name,
+                "Nomor Rekening": visible_rekening,
+                "Nomor Rekening Tersensor": masked_rekening,
+                "Nama Pemilik Rekening": owner_name,
+            }
     except Exception:
-        modal, target = get_nik_target(page, masked_nik)
+        modal, bank_field, target, owner_field = get_rekening_targets(page)
 
-    if not click_nik_eye(modal, target, page):
+    if not click_rekening_eye(modal, target, page):
         page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
-        raise RuntimeError(f"Tombol mata NIK tidak ditemukan. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
+        raise RuntimeError(f"Tombol mata Nomor Rekening tidak ditemukan. Screenshot debug: {DEBUG_SCREENSHOT_PATH}")
 
     reclick_after_captcha = False
 
     for _ in range(240):
         page.wait_for_timeout(250)
         if wait_access_limited_if_present(page, tracker):
-            modal, target = get_nik_target(page, masked_nik)
-            reclick_after_captcha = False
+            raise RuntimeError("Captcha selesai; ulang buka detail agar state modal rekening bersih.")
 
         try:
-            visible_nik = read_nik_from_target(target)
-            if visible_nik:
-                return visible_nik
+            visible_rekening = read_rekening_from_target(target)
+            if visible_rekening:
+                return {
+                    "Nama Bank": bank_name,
+                    "Nomor Rekening": visible_rekening,
+                    "Nomor Rekening Tersensor": masked_rekening,
+                    "Nama Pemilik Rekening": owner_name,
+                }
         except Exception:
-            modal, target = get_nik_target(page, masked_nik)
+            modal, bank_field, target, owner_field = get_rekening_targets(page)
+            bank_name = field_text(bank_field)
+            owner_name = field_text(owner_field)
             continue
 
         if not reclick_after_captcha:
-            reclick_after_captcha = click_nik_eye(modal, target, page)
+            reclick_after_captcha = click_rekening_eye(modal, target, page)
 
     page.screenshot(path=str(DEBUG_SCREENSHOT_PATH), full_page=True)
-    raise RuntimeError("NIK penuh tidak ditemukan setelah tombol mata diklik.")
+    raise RuntimeError("Nomor rekening penuh tidak ditemukan setelah tombol mata diklik.")
 
 
 def close_modal(page) -> None:
@@ -446,7 +578,7 @@ def scrape_current_page(
         rows = visible_rows(page)
         row = rows.nth(index)
         data = get_row_data(row)
-        existing_ids = {str(row.get("Sobat-ID", "")).strip() for row in rows_out if row.get("NIK")}
+        existing_ids = {str(row.get("Sobat-ID", "")).strip() for row in rows_out if row.get("Nomor Rekening")}
         if data["Sobat-ID"] in existing_ids:
             print(f"  -> Skip halaman {page_no}, row {index + 1}, Sobat-ID {data['Sobat-ID']} (sudah ada di JSON).")
             continue
@@ -454,16 +586,41 @@ def scrape_current_page(
         label = f"halaman {page_no}, row {index + 1}, Sobat-ID {data['Sobat-ID']}"
         print(f"  -> Buka detail {label}")
 
-        tracker.sleep(page, "sebelum buka detail")
-        captcha_bypass.random_scroll(page)
-        open_detail_from_row(page, index, tracker)
-        data["NIK"] = reveal_nik_from_modal(page, data["NIK Tersensor"], tracker)
-        close_modal(page)
+        last_error = None
+        for detail_attempt in range(1, 4):
+            try:
+                tracker.sleep(page, "sebelum buka detail")
+                captcha_bypass.random_scroll(page)
+                open_detail_from_row(page, index, tracker)
+                data.update(reveal_rekening_from_modal(page, tracker))
+                close_modal(page)
+                last_error = None
+                break
+            except Exception as error:
+                last_error = error
+                wait_access_limited_if_present(page, tracker)
+
+                try:
+                    close_modal(page)
+                except Exception:
+                    pass
+
+                if detail_attempt >= 3:
+                    raise
+
+                print(
+                    f"     [Retry] Detail rekening belum kebaca untuk {data['Sobat-ID']} "
+                    f"(percobaan {detail_attempt}/3): {type(error).__name__}: {error}"
+                )
+                page.wait_for_timeout(1500)
+
+        if last_error is not None:
+            raise last_error
 
         rows_out.append(data)
         write_progress(rows_out, meta)
         tracker.record_success()
-        print(f"     [OK] NIK penuh tersimpan untuk {data['Nama']} ({data['Sobat-ID']}).")
+        print(f"     [OK] Rekening tersimpan untuk {data['Nama']} ({data['Sobat-ID']}) - {data['Nama Bank']}.")
         tracker.sleep(page, "setelah tutup detail")
 
         if pause_every > 0 and len(rows_out) % pause_every == 0:
@@ -539,7 +696,7 @@ def run(
     print(f"- Username SSO: {username}")
     print(f"- Sensus/Survei: {sensus_survei}")
     print(f"- Kegiatan: {kegiatan}")
-    print("- Mode baca: scrape tabel dan modal NIK, tidak klik Pilih Mitra/Tawarkan/Assign.")
+    print("- Mode baca: scrape tabel dan modal Rekening, tidak klik Pilih Mitra/Tawarkan/Assign.")
 
     rows_out: list[dict] = load_existing_rows() if resume else []
     if rows_out:
@@ -605,7 +762,7 @@ def run(
                 write_progress(rows_out, {**meta, "total_pages_detected": total_pages})
                 print("\n[TERHENTI] Browser/halaman tertutup atau elemen berubah saat proses.")
                 print(f"          Progress aman tersimpan: {len(rows_out)} row.")
-                print("          Jalankan run_scrape_kepka_full_nik.cmd lagi untuk lanjut dari row berikutnya.")
+                print("          Jalankan run_scrape_kepka_rekening.cmd lagi untuk lanjut dari row berikutnya.")
                 print(f"          Detail singkat: {type(error).__name__}: {error}")
                 return
 
@@ -625,14 +782,14 @@ def run(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scrape tabel KEPKA SE26 dengan NIK penuh dari modal detail. Tidak melakukan assign/tawarkan."
+        description="Scrape tabel KEPKA SE26 dengan bank dan nomor rekening dari modal detail. Tidak melakukan assign/tawarkan."
     )
     parser.add_argument("--headless", action="store_true", help="Jalankan browser tanpa tampilan.")
     parser.add_argument("--hold-seconds", type=int, default=0, help="Tahan browser setelah selesai.")
     parser.add_argument("--max-pages", type=int, default=None, help="Batasi jumlah halaman untuk test.")
     parser.add_argument("--max-rows", type=int, default=None, help="Batasi jumlah row untuk test.")
-    parser.add_argument("--delay-min", type=float, default=1.0, help="Jeda minimum antar aksi row.")
-    parser.add_argument("--delay-max", type=float, default=2.5, help="Jeda maksimum antar aksi row.")
+    parser.add_argument("--delay-min", type=float, default=0.0, help="Jeda minimum antar aksi row.")
+    parser.add_argument("--delay-max", type=float, default=0.0, help="Jeda maksimum antar aksi row.")
     parser.add_argument("--pause-every", type=int, default=0, help="Istirahat setiap N row sukses. 0 = tidak ada.")
     parser.add_argument("--pause-seconds", type=float, default=10.0, help="Durasi istirahat periodik.")
     parser.add_argument("--resume", action="store_true", help="Lanjut dari JSON lama dan skip Sobat-ID yang sudah tersimpan.")
